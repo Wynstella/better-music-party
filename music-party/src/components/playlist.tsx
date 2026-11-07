@@ -12,9 +12,12 @@ import {
   Skeleton,
   Stack,
   Divider,
+  Image,
 } from '@chakra-ui/react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getMusicsByPlaylist, Music } from '../api/api';
+import { useToast } from '@chakra-ui/react';
+import { toastError } from '../utils/toast';
 
 export const Playlist = (props: {
   id: string;
@@ -26,13 +29,38 @@ export const Playlist = (props: {
   const [musics, setMusics] = useState<Music[]>([]);
   const [canshow, setCanshow] = useState(false);
   const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const requestInFlight = useRef(false);
+  const sentinel = useRef<HTMLDivElement>(null);
+  const toast = useToast();
+
+  const loadNextPage = useCallback(async () => {
+    if (requestInFlight.current || loading || !hasMore) return;
+    requestInFlight.current = true;
+    setLoading(true);
+    try {
+      const result = await getMusicsByPlaylist(props.id, page, props.apiName);
+      setMusics((current) => current.concat(result));
+      setPage((current) => current + 1);
+      setHasMore(result.length === 10);
+      setCanshow(true);
+    } catch (error) {
+      toastError(toast, error instanceof Error ? error.message : String(error));
+    } finally {
+      requestInFlight.current = false;
+      setLoading(false);
+    }
+  }, [hasMore, loading, page, props.apiName, props.id, toast]);
 
   useEffect(() => {
-    if (!loaded) return;
-    getMusicsByPlaylist(props.id, page, props.apiName).then((res) =>
-      setMusics(res)
-    );
-  }, [page]);
+    if (!loaded || !hasMore || !sentinel.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadNextPage();
+    }, { rootMargin: '220px' });
+    observer.observe(sentinel.current);
+    return () => observer.disconnect();
+  }, [loaded, hasMore, loadNextPage]);
 
   return (
     <AccordionItem>
@@ -40,14 +68,8 @@ export const Playlist = (props: {
         <AccordionButton
           onClick={async () => {
             if (loaded) return;
-            else setLoaded(true);
-            const musics = await getMusicsByPlaylist(
-              props.id,
-              1,
-              props.apiName
-            );
-            setMusics(musics);
-            setCanshow(true);
+            setLoaded(true);
+            void loadNextPage();
           }}
         >
           <Box as='span' flex='1' textAlign='left'>
@@ -58,15 +80,17 @@ export const Playlist = (props: {
       </h2>
       <AccordionPanel pb={4}>
         <Skeleton isLoaded={canshow}>
-          {musics.length > 0 || (musics.length === 0 && page != 1) ? (
+          {musics.length > 0 ? (
             <Stack>
               <Divider />
               <List spacing={2}>
-                {musics.map((m) => (
-                  <ListItem key={m.id}>
-                    <Flex>
-                      <Text flex={1}>{`${m.name} - ${m.artists}`}</Text>
+                {musics.map((m, index) => (
+                  <ListItem key={`${m.id}-${index}`}>
+                    <Flex align="center" gap={3} minH="52px">
+                      {m.coverUrl && <Image src={m.coverUrl} alt="" boxSize="44px" borderRadius="sm" objectFit="cover" />}
+                      <Text flex={1} noOfLines={2}>{`${m.name} - ${m.artists.join(', ')}`}</Text>
                       <Button
+                        size="sm"
                         onClick={() => {
                           props.enqueue(m.id, props.apiName);
                         }}
@@ -78,27 +102,13 @@ export const Playlist = (props: {
                 ))}
               </List>
               <Divider />
-              <Flex justifyContent={'flex-end'}>
-                <Flex alignItems={'center'}>{`第 ${page} 页`}</Flex>
-                <Button
-                  colorScheme={'teal'}
-                  ml={4}
-                  onClick={() => setPage((o) => (o > 1 ? o - 1 : 1))}
-                >
-                  上一页
-                </Button>
-                <Button
-                  colorScheme={'teal'}
-                  ml={4}
-                  onClick={() => setPage((o) => o + 1)}
-                >
-                  下一页
-                </Button>
-              </Flex>
             </Stack>
           ) : (
-            <Text>歌单为空</Text>
+            canshow && <Text>歌单为空</Text>
           )}
+          <Box ref={sentinel} height="1px" />
+          {loading && <Text textAlign="center" color="gray.500" py={3}>正在加载…</Text>}
+          {!hasMore && musics.length > 0 && <Text textAlign="center" color="gray.500" py={2}>已加载全部歌曲</Text>}
         </Skeleton>
       </AccordionPanel>
     </AccordionItem>

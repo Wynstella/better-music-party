@@ -1,5 +1,5 @@
-name: docker-build
-on: [push]
+name: Legacy Docker images (manual)
+on: [workflow_dispatch]
 jobs:
   backend:
     runs-on: ubuntu-latest

@@ -1,4 +1,20 @@
 cookie.txt
+*cookie*.bin
+users.dat*
+keys/
+data/
+*.local.json
+appsettings.Local.json
+.env
+.env.*
+!.env.example
+.idea/
+.dotnet-home/
+tools/cloudflared.exe
+MusicPartyLauncher/bin/
+MusicPartyLauncher/obj/
+MusicPartyLauncher/publish/
+MusicPartyLauncher/publish-*/
 MusicParty/build
 MusicParty/bin
 
@@ -14,6 +30,7 @@ music-party/coverage
 
 # next.js
 music-party/.next/
+music-party/.next-*/
 music-party/out/
 
 # production

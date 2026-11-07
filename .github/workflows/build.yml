@@ -1,0 +1,27 @@
+name: Build
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install -g pnpm@11.21.0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            10.0.x
+      - run: pnpm install --frozen-lockfile
+        working-directory: music-party
+      - run: pnpm build
+        working-directory: music-party
+      - run: dotnet build MusicParty/MusicParty.csproj -c Release
+      - run: dotnet build MusicPartyLauncher/MusicPartyLauncher.csproj -c Release

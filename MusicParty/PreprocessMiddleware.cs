@@ -23,9 +23,7 @@ public class PreprocessMiddleware
 
         if (!string.IsNullOrEmpty(id) && _userManager.FindUserById(id) is null)
         {
-            await _userManager.LogoutAsync(id);
-            var newId = Guid.NewGuid().ToString()[..8];
-            await _userManager.LoginAsync(newId);
+            _userManager.RestoreUser(id);
         }
 
         await _next(context);

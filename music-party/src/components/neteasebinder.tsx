@@ -8,15 +8,19 @@ import {
   DrawerFooter,
   DrawerHeader,
   DrawerOverlay,
+  Image,
   Flex,
   Input,
   List,
   ListItem,
+  Spinner,
+  Stack,
   useDisclosure,
   useToast,
 } from '@chakra-ui/react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { bindAccount, MusicServiceUser, searchUsers } from '../api/api';
+import * as api from '../api/api';
 
 export const NeteaseBinder = (props: {}) => {
   const { isOpen, onOpen, onClose } = useDisclosure();
@@ -24,8 +28,62 @@ export const NeteaseBinder = (props: {}) => {
 
   const [users, setUsers] = useState<MusicServiceUser[]>([]);
   const [keyword, setKeyword] = useState('');
+  const [qrImage, setQrImage] = useState('');
+  const [qrStatus, setQrStatus] = useState('');
+  const [qrLoading, setQrLoading] = useState(false);
 
   const t = useToast();
+
+  useEffect(() => {
+    if (!isOpen || !qrImage) return;
+    let active = true;
+    let polling = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const result = await api.pollNeteaseQrLogin();
+        if (!active) return;
+        if (result.state === 'authenticated') {
+          if (timer) window.clearInterval(timer);
+          setQrStatus(`已绑定 ${result.name ?? '网易云账号'}`);
+          t({ title: '网易云账号绑定成功', status: 'success', duration: 3000, position: 'top-right' });
+          window.setTimeout(() => window.location.reload(), 900);
+        } else if (result.state === 'scanned') {
+          setQrStatus('已扫码，请在网易云音乐中确认登录');
+        } else if (result.state === 'expired') {
+          if (timer) window.clearInterval(timer);
+          setQrStatus('二维码已过期，请重新获取');
+        } else if (result.state === 'failed') {
+          if (timer) window.clearInterval(timer);
+          setQrStatus('网易云确认成功，但账号校验失败，请重新获取二维码');
+        }
+      } catch (error) {
+        if (active) setQrStatus('登录状态暂时无法查询');
+      } finally {
+        polling = false;
+      }
+    };
+    timer = window.setInterval(poll, 2500);
+    return () => {
+      active = false;
+      if (timer) window.clearInterval(timer);
+    };
+  }, [isOpen, qrImage, t]);
+
+  const createQr = async () => {
+    setQrLoading(true);
+    setQrStatus('等待扫码');
+    try {
+      const result = await api.startNeteaseQrLogin();
+      setQrImage(result.image);
+    } catch (error) {
+      setQrStatus('二维码创建失败，请稍后重试');
+    } finally {
+      setQrLoading(false);
+    }
+  };
 
   return (
     <>
@@ -41,9 +99,20 @@ export const NeteaseBinder = (props: {}) => {
         <DrawerOverlay />
         <DrawerContent>
           <DrawerCloseButton />
-          <DrawerHeader>搜索并绑定你的账号</DrawerHeader>
+          <DrawerHeader>绑定网易云账号</DrawerHeader>
 
           <DrawerBody>
+            <Stack spacing={3} mb={6} align="center">
+              <Button colorScheme='pink' onClick={createQr} isLoading={qrLoading} width="100%">
+                {qrImage ? '刷新登录二维码' : '扫码登录并绑定'}
+              </Button>
+              {qrImage && <Image src={qrImage} alt="网易云登录二维码" boxSize="188px" borderRadius="md" />}
+              {qrStatus && <Text fontSize="sm" color="gray.600">{qrStatus}</Text>}
+              <Text fontSize="xs" color="gray.500" textAlign="center">
+                扫码授权仅绑定到当前访客，用于读取歌单、关注歌手和收藏歌曲。
+              </Text>
+            </Stack>
+            <Text fontSize="sm" fontWeight="semibold" mb={2}>也可以搜索公开账号绑定歌单</Text>
             <Flex>
               <Input
                 flex={1}

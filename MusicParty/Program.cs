@@ -1,4 +1,5 @@
 using AspNetCore.Proxy;
+using Microsoft.AspNetCore.DataProtection;
 using MusicParty;
 using MusicParty.Hub;
 using MusicParty.MusicApi;
@@ -15,6 +16,14 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR();
+
+var dataPath = builder.Configuration["DataPath"] ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MusicParty");
+var keyPath = Path.Combine(dataPath, "keys");
+Directory.CreateDirectory(keyPath);
+var dataProtection = builder.Services.AddDataProtection()
+    .SetApplicationName("MusicParty")
+    .PersistKeysToFileSystem(new DirectoryInfo(keyPath));
+if (OperatingSystem.IsWindows()) dataProtection.ProtectKeysWithDpapi();
 
 // Add music api
 var musicApiList = new List<IMusicApi>();
@@ -59,6 +68,7 @@ builder.Services.AddSingleton<UserManager>();
 builder.Services.AddAuthentication("Cookies").AddCookie("Cookies");
 builder.Services.AddProxies();
 builder.Services.AddSingleton<MusicBroadcaster>();
+builder.Services.AddSingleton<RoomTimeline>();
 
 var app = builder.Build();
 
@@ -73,9 +83,9 @@ app.UseRouting();
 
 app.UseAuthentication();
 
-app.UseAuthorization();
-
 app.UsePreprocess();
+
+app.UseAuthorization();
 
 app.UseEndpoints(endpoints =>
 {

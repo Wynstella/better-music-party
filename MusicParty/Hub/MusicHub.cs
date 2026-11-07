@@ -8,8 +8,9 @@ namespace MusicParty.Hub;
 public class MusicHub : Microsoft.AspNetCore.SignalR.Hub
 {
     private static HashSet<string> OnlineUsers { get; } = new();
-    private static List<string> DuplicatedConnectionIds { get; } = new();
-    private static Queue<(string name, string content)> Last5Chat { get; } = new();
+    private static Dictionary<string, HashSet<string>> UserConnections { get; } = new();
+    private static object UserConnectionsLock { get; } = new();
+    private readonly RoomTimeline _timeline;
     private readonly IEnumerable<IMusicApi> _musicApis;
     private readonly MusicBroadcaster _musicBroadcaster;
     private readonly UserManager _userManager;
@@ -17,52 +18,65 @@ public class MusicHub : Microsoft.AspNetCore.SignalR.Hub
 
     public MusicHub(IEnumerable<IMusicApi> musicApis, MusicBroadcaster musicBroadcaster,
         UserManager userManager,
-        ILogger<MusicHub> logger)
+        ILogger<MusicHub> logger, RoomTimeline timeline)
     {
         _musicApis = musicApis;
         _musicBroadcaster = musicBroadcaster;
         _userManager = userManager;
         _logger = logger;
+        _timeline = timeline;
     }
 
     public override async Task OnConnectedAsync()
     {
-        if (OnlineUsers.Contains(Context.User!.Identity!.Name!)) // don't allow login twice
+        var userId = Context.User!.Identity!.Name!;
+        bool firstConnection;
+        lock (UserConnectionsLock)
         {
-            DuplicatedConnectionIds.Add(Context.ConnectionId);
-            await Clients.Caller.SendAsync("Abort", "You have already logged in.");
-            Context.Abort();
-            return;
+            if (!UserConnections.TryGetValue(userId, out var connections))
+            {
+                connections = new HashSet<string>();
+                UserConnections[userId] = connections;
+            }
+            firstConnection = connections.Count == 0;
+            connections.Add(Context.ConnectionId);
+            OnlineUsers.Add(userId);
         }
 
-        OnlineUsers.Add(Context.User.Identity.Name!);
-        await OnlineUserLogin(Clients.Others, Context.User.Identity.Name!);
-        if (Last5Chat.Count > 0)
+        await Clients.Caller.SendAsync("RoomEvents", _timeline.Snapshot());
+        if (firstConnection)
         {
-            foreach (var chat in Last5Chat)
-            {
-                await NewChat(Clients.Caller, chat.name, chat.content);
-            }
+            await OnlineUserLogin(Clients.Others, userId);
+            await _timeline.Publish("join", userId);
         }
 
         if (_musicBroadcaster.NowPlaying is not null)
         {
             var (music, enqueuerId) = _musicBroadcaster.NowPlaying.Value;
             await SetNowPlaying(Clients.Caller, music, _userManager.FindUserById(enqueuerId)!.Name,
-                (int)(DateTime.Now - _musicBroadcaster.NowPlayingStartedTime).TotalSeconds);
+                (int)(DateTime.Now - _musicBroadcaster.NowPlayingStartedTime).TotalSeconds,
+                _musicBroadcaster.CurrentLikeCount, _musicBroadcaster.HasLiked(userId));
         }
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        if (DuplicatedConnectionIds.Contains(Context.ConnectionId))
+        var userId = Context.User!.Identity!.Name!;
+        bool lastConnection;
+        lock (UserConnectionsLock)
         {
-            DuplicatedConnectionIds.Remove(Context.ConnectionId);
-            return;
+            lastConnection = UserConnections.TryGetValue(userId, out var connections)
+                && connections.Remove(Context.ConnectionId)
+                && connections.Count == 0;
+            if (lastConnection)
+            {
+                UserConnections.Remove(userId);
+                OnlineUsers.Remove(userId);
+            }
         }
 
-        OnlineUsers.Remove(Context.User!.Identity!.Name!);
-        await OnlineUserLogout(Context.User.Identity.Name!);
+        if (lastConnection)
+            await OnlineUserLogout(userId);
     }
 
     #region Remote invokable
@@ -84,19 +98,34 @@ public class MusicHub : Microsoft.AspNetCore.SignalR.Hub
 
     public async Task RequestSetNowPlaying()
     {
-        if (_musicBroadcaster.NowPlaying is null) return;
+        if (_musicBroadcaster.NowPlaying is null)
+        {
+            await Clients.Caller.SendAsync("PlaybackStopped");
+            return;
+        }
         var (music, enqueuerId) = _musicBroadcaster.NowPlaying.Value;
         await SetNowPlaying(Clients.Caller, music, _userManager.FindUserById(enqueuerId)!.Name,
-            (int)(DateTime.Now - _musicBroadcaster.NowPlayingStartedTime).TotalSeconds);
+            (int)(DateTime.Now - _musicBroadcaster.NowPlayingStartedTime).TotalSeconds,
+            _musicBroadcaster.CurrentLikeCount, _musicBroadcaster.HasLiked(Context.User!.Identity!.Name!));
     }
+
+    public async Task<int> LikeCurrentSong(string playbackId)
+    {
+        return await _musicBroadcaster.LikeCurrentSong(Context.User!.Identity!.Name!, playbackId);
+    }
+
+    public RoomEvent[] GetRoomEvents() => _timeline.Snapshot();
+
+    public Task SeekTo(string songId, double seconds) => _musicBroadcaster.SeekTo(songId, seconds);
 
     public record MusicEnqueueOrder(string ActionId, Music Music, string EnqueuerName);
 
-    public IEnumerable<MusicEnqueueOrder> GetMusicQueue()
-    {
-        return _musicBroadcaster.GetQueue().Select(x =>
-            new MusicEnqueueOrder(x.ActionId, x.Music, _userManager.FindUserById(x.EnqueuerId)!.Name)).ToList();
-    }
+    public async Task<IEnumerable<MusicEnqueueOrder>> GetMusicQueue() =>
+        (await _musicBroadcaster.GetQueueState()).Entries;
+
+    public Task<MusicBroadcaster.QueueState> GetQueueState() => _musicBroadcaster.GetQueueState();
+
+    public Task<bool> RemoveQueuedSong(string actionId) => _musicBroadcaster.RemoveQueuedSong(actionId);
 
     public async Task NextSong()
     {
@@ -118,22 +147,30 @@ public class MusicHub : Microsoft.AspNetCore.SignalR.Hub
 
     public IEnumerable<User> GetOnlineUsers()
     {
-        return OnlineUsers.Select(x => new User(x, _userManager.FindUserById(x)!.Name)).ToList();
+        string[] users;
+        lock (UserConnectionsLock)
+            users = OnlineUsers.ToArray();
+        return users.Select(x => new User(x, _userManager.FindUserById(x)!.Name)).ToList();
     }
 
     public async Task ChatSay(string content)
     {
-        var name = _userManager.FindUserById(Context.User!.Identity!.Name!)!.Name;
-        while (Last5Chat.Count >= 5) Last5Chat.Dequeue();
-        Last5Chat.Enqueue((name, content));
-        await NewChat(Clients.All, name, content);
+        content = content.Trim();
+        if (content.Length is 0 or > 500) throw new HubException("消息长度应为 1–500 个字。");
+        var userId = Context.User!.Identity!.Name!;
+        await _timeline.Publish("chat", userId, content);
     }
 
     #endregion
 
-    private async Task SetNowPlaying(IClientProxy target, PlayableMusic music, string enqueuerName, int playedTime)
+    private async Task SetNowPlaying(
+        IClientProxy target,
+        PlayableMusic music,
+        string enqueuerName,
+        int playedTime,
+        int likeCount, bool hasLiked)
     {
-        await target.SendAsync(nameof(SetNowPlaying), music, enqueuerName, playedTime);
+        await target.SendAsync(nameof(SetNowPlaying), music, enqueuerName, playedTime, likeCount, hasLiked);
     }
 
     private async Task OnlineUserLogin(IClientProxy target, string id)
@@ -151,8 +188,4 @@ public class MusicHub : Microsoft.AspNetCore.SignalR.Hub
         await Clients.All.SendAsync(nameof(OnlineUserRename), id, _userManager.FindUserById(id)!.Name);
     }
 
-    private async Task NewChat(IClientProxy target, string name, string content)
-    {
-        await target.SendAsync(nameof(NewChat), name, content);
-    }
 }

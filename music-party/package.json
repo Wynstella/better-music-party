@@ -1,6 +1,7 @@
 {
-  "name": "music-party",
-  "version": "0.1.0",
+  "name": "better-music-party",
+  "version": "1.0.0-beta.1",
+  "packageManager": "pnpm@11.21.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
